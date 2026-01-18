@@ -2,29 +2,50 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/csv"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
+
+const UnknownBankName = "Unknown Bank"
+const BinLength = 6
+
+type Bank struct {
+	Name    string
+	BinFrom int
+	BinTo   int
+}
 
 func main() {
 	fmt.Println("Загрузка программы валидации банковских карт космической системы...")
 
 	banks, err := loadBankData("banks.txt")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Критическая ошибка: не удалось загрузить базу банков: %v", err)
 	}
 
+	reader := bufio.NewReader(os.Stdin)
+
 	for {
-		cardNumber := getUserInput()
+		cardNumber, err := getUserInput(reader)
+		if err != nil {
+			if err == io.EOF {
+				fmt.Println("\nВвод завершён. Закрытие программы.")
+				break
+			}
+
+			fmt.Println("Ошибка чтения ввода:", err)
+			continue
+		}
 
 		if len(cardNumber) == 0 {
-			fmt.Println("Закрытие программы...")
-			break
+			continue
 		}
 
 		if isValid := validateInput(cardNumber); !isValid {
@@ -37,10 +58,15 @@ func main() {
 			continue
 		}
 
-		bin := extractBIN(cardNumber)
+		bin, err := extractBIN(cardNumber)
+		if err != nil {
+			fmt.Println("Ошибка при извлечении BIN:", err)
+			continue
+		}
+
 		bankName := identifyBank(bin, banks)
 
-		if bankName == EUB {
+		if bankName == UnknownBankName {
 			fmt.Printf("Ошибка: не удалось определить Банк карты %v\n", cardNumber)
 			continue
 		}
@@ -49,20 +75,16 @@ func main() {
 	}
 }
 
-type Bank struct {
-	Name    string
-	BinFrom int
-	BinTo   int
-}
-
-func loadBankData(path string) (banks []Bank, err error) {
+func loadBankData(path string) ([]Bank, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		log.Fatal("Error opening file: ", err)
+		return nil, err
 	}
 	defer file.Close()
 
 	reader := csv.NewReader(file)
+	var banks []Bank
+	lineNum := 0
 
 	for {
 		bank, err := reader.Read()
@@ -74,8 +96,17 @@ func loadBankData(path string) (banks []Bank, err error) {
 			return nil, err
 		}
 
-		binFrom, _ := strconv.Atoi(bank[1])
-		binTo, _ := strconv.Atoi(bank[2])
+		lineNum++
+
+		binFrom, err := strconv.Atoi(bank[1])
+		if err != nil {
+			return nil, fmt.Errorf("Не удалось преобразовать значение binFrom банка %v в строке %v, ошибка: %v", bank[0], lineNum, err)
+		}
+
+		binTo, err := strconv.Atoi(bank[2])
+		if err != nil {
+			return nil, fmt.Errorf("Не удалось преобразовать значение binTo банка %v в строке %v, ошибка: %v", bank[0], lineNum, err)
+		}
 
 		banks = append(banks, Bank{
 			Name:    bank[0],
@@ -84,24 +115,39 @@ func loadBankData(path string) (banks []Bank, err error) {
 		})
 	}
 
+	slices.SortFunc(banks, func(a, b Bank) int {
+		return cmp.Compare(a.BinFrom, b.BinFrom)
+	})
+
 	return banks, nil
 }
 
-const EUB = "Unknown Bank"
-
-func identifyBank(bin int, banks []Bank) (BankName string) {
-	for _, bank := range banks {
-		if bin >= bank.BinFrom && bin <= bank.BinTo {
-			return bank.Name
+func identifyBank(bin int, banks []Bank) string {
+	idx, isFound := slices.BinarySearchFunc(banks, bin, func(b Bank, target int) int {
+		if target < b.BinFrom {
+			return 1
 		}
+
+		if target > b.BinTo {
+			return -1
+		}
+
+		return 0
+	})
+
+	if isFound {
+		return banks[idx].Name
 	}
 
-	return EUB
+	return UnknownBankName
 }
 
-func extractBIN(cardNumber string) (bin int) {
-	bin, _ = strconv.Atoi(cardNumber[:6])
-	return bin
+func extractBIN(cardNumber string) (int, error) {
+	if len(cardNumber) < BinLength {
+		return 0, fmt.Errorf("Номер карты слишком короткий для извлечения BIN, длина должна быть >= 6")
+	}
+
+	return strconv.Atoi(cardNumber[:BinLength])
 }
 
 func validateLuhn(cardNumber string) bool {
@@ -109,8 +155,7 @@ func validateLuhn(cardNumber string) bool {
 	shouldDouble := false
 
 	for i := len(cardNumber) - 1; i >= 0; i-- {
-		r := rune(cardNumber[i])
-		digit := int(r - '0')
+		digit := int(cardNumber[i] - '0')
 
 		if shouldDouble {
 			digit *= 2
@@ -127,15 +172,19 @@ func validateLuhn(cardNumber string) bool {
 	return sum%10 == 0
 }
 
-func getUserInput() string {
-	fmt.Println("Введите номер карты")
+func getUserInput(reader *bufio.Reader) (string, error) {
+	fmt.Print("Введите номер карты: ")
 
-	reader := bufio.NewReader(os.Stdin)
-	userInput, _ := reader.ReadString('\n')
+	userInput, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+
 	userInput = strings.TrimSpace(userInput)
 	userInput = strings.ReplaceAll(userInput, " ", "")
+	userInput = strings.ReplaceAll(userInput, "-", "")
 
-	return userInput
+	return userInput, nil
 }
 
 func validateInput(input string) bool {
