@@ -144,7 +144,7 @@ func identifyBank(bin int, banks []Bank) string {
 
 func extractBIN(cardNumber string) (int, error) {
 	if len(cardNumber) < BinLength {
-		return 0, fmt.Errorf("Номер карты слишком короткий для извлечения BIN, длина должна быть >= 6")
+		return 0, fmt.Errorf("Номер карты слишком короткий для извлечения BIN, длина должна быть >= %v", BinLength)
 	}
 
 	return strconv.Atoi(cardNumber[:BinLength])
