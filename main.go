@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"encoding/csv"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -13,69 +14,77 @@ import (
 	"strings"
 )
 
-const UnknownBankName = "Unknown Bank"
-const BinLength = 6
+const (
+	binLength     = 6
+	minCardLength = 13
+	maxCardLength = 19
+)
 
 type Bank struct {
-	Name    string
-	BinFrom int
-	BinTo   int
+	Name     string
+	StartBIN int
+	EndBIN   int
 }
 
 func main() {
+	dbPath := flag.String("db", "banks.txt", "Путь к файлу с базой банков")
+	flag.Parse()
+
 	fmt.Println("Загрузка программы валидации банковских карт космической системы...")
 
-	banks, err := loadBankData("banks.txt")
+	banks, err := loadBanks(*dbPath)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось загрузить базу банков: %v", err)
 	}
 
-	reader := bufio.NewReader(os.Stdin)
+	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
-		cardNumber, err := getUserInput(reader)
-		if err != nil {
-			if err == io.EOF {
-				fmt.Println("\nВвод завершён. Закрытие программы.")
-				break
-			}
+		fmt.Print("Введите номер карты (или пустую строку для выхода): ")
 
-			fmt.Println("Ошибка чтения ввода:", err)
+		if !scanner.Scan() {
+			break
+		}
+
+		rawInput := scanner.Text()
+		if strings.TrimSpace(rawInput) == "" {
+			fmt.Println("\nВвод завершён. Закрытие программы.")
+			break
+		}
+
+		cardNumber, isValid := sanitizeAndValidate(rawInput)
+		if !isValid {
+			fmt.Printf("Ошибка: введён некорректный формат номера карты (допускаются только цифры, пробелы и тире, длина от %v до %v цифр\n", minCardLength, maxCardLength)
 			continue
 		}
 
-		if len(cardNumber) == 0 {
+		if !isValidLuhn(cardNumber) {
+			fmt.Println("Ошибка: введённый номер карты не прошёл проверку по алгоритму Луна")
 			continue
 		}
 
-		if isValid := validateInput(cardNumber); !isValid {
-			fmt.Println("Введён некорректный номер карты")
-			continue
-		}
-
-		if isValid := validateLuhn(cardNumber); !isValid {
-			fmt.Println("Введённый номер карты не прошёл проверку")
-			continue
-		}
-
-		bin, err := extractBIN(cardNumber)
+		bin, err := parseBIN(cardNumber)
 		if err != nil {
 			fmt.Println("Ошибка при извлечении BIN:", err)
 			continue
 		}
 
-		bankName := identifyBank(bin, banks)
+		bankName, found := findBankByBIN(bin, banks)
 
-		if bankName == UnknownBankName {
-			fmt.Printf("Ошибка: не удалось определить Банк карты %v\n", cardNumber)
+		if !found {
+			fmt.Printf("Внимание: не удалось определить банк для карты %v\n", cardNumber)
 			continue
 		}
 
-		fmt.Printf("Карта %v относится к банку %v\n", cardNumber, bankName)
+		fmt.Printf("Карта %v относится к банку: %v\n", cardNumber, bankName)
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Ошибка чтения ввода: %v\n", err)
 	}
 }
 
-func loadBankData(path string) ([]Bank, error) {
+func loadBanks(path string) ([]Bank, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -83,11 +92,13 @@ func loadBankData(path string) ([]Bank, error) {
 	defer file.Close()
 
 	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = 3
+
 	var banks []Bank
 	lineNum := 0
 
 	for {
-		bank, err := reader.Read()
+		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
@@ -98,59 +109,56 @@ func loadBankData(path string) ([]Bank, error) {
 
 		lineNum++
 
-		binFrom, err := strconv.Atoi(bank[1])
+		startBIN, err := strconv.Atoi(record[1])
 		if err != nil {
-			return nil, fmt.Errorf("Не удалось преобразовать значение binFrom банка %v в строке %v, ошибка: %v", bank[0], lineNum, err)
+			return nil, fmt.Errorf("не удалось преобразовать значение startBIN банка %v в строке %v, ошибка: %v", record[0], lineNum, err)
 		}
 
-		binTo, err := strconv.Atoi(bank[2])
+		endBIN, err := strconv.Atoi(record[2])
 		if err != nil {
-			return nil, fmt.Errorf("Не удалось преобразовать значение binTo банка %v в строке %v, ошибка: %v", bank[0], lineNum, err)
+			return nil, fmt.Errorf("не удалось преобразовать значение endBIN банка %v в строке %v, ошибка: %v", record[0], lineNum, err)
 		}
 
 		banks = append(banks, Bank{
-			Name:    bank[0],
-			BinFrom: binFrom,
-			BinTo:   binTo,
+			Name:     record[0],
+			StartBIN: startBIN,
+			EndBIN:   endBIN,
 		})
 	}
 
 	slices.SortFunc(banks, func(a, b Bank) int {
-		return cmp.Compare(a.BinFrom, b.BinFrom)
+		return cmp.Compare(a.StartBIN, b.StartBIN)
 	})
 
 	return banks, nil
 }
 
-func identifyBank(bin int, banks []Bank) string {
-	idx, isFound := slices.BinarySearchFunc(banks, bin, func(b Bank, target int) int {
-		if target < b.BinFrom {
-			return 1
+func sanitizeAndValidate(input string) (string, bool) {
+	var sb strings.Builder
+	sb.Grow(len(input))
+
+	for _, r := range input {
+		if r == ' ' || r == '-' {
+			continue
 		}
 
-		if target > b.BinTo {
-			return -1
+		if r < '0' || r > '9' {
+			return "", false
 		}
 
-		return 0
-	})
-
-	if isFound {
-		return banks[idx].Name
+		sb.WriteRune(r)
 	}
 
-	return UnknownBankName
-}
+	cleanInput := sb.String()
 
-func extractBIN(cardNumber string) (int, error) {
-	if len(cardNumber) < BinLength {
-		return 0, fmt.Errorf("Номер карты слишком короткий для извлечения BIN, длина должна быть >= %v", BinLength)
+	if len(cleanInput) < minCardLength || len(cleanInput) > maxCardLength {
+		return "", false
 	}
 
-	return strconv.Atoi(cardNumber[:BinLength])
+	return cleanInput, true
 }
 
-func validateLuhn(cardNumber string) bool {
+func isValidLuhn(cardNumber string) bool {
 	var sum int
 	shouldDouble := false
 
@@ -172,31 +180,30 @@ func validateLuhn(cardNumber string) bool {
 	return sum%10 == 0
 }
 
-func getUserInput(reader *bufio.Reader) (string, error) {
-	fmt.Print("Введите номер карты: ")
-
-	userInput, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
+func parseBIN(cardNumber string) (int, error) {
+	if len(cardNumber) < binLength {
+		return 0, fmt.Errorf("номер карты слишком короткий для извлечения BIN, длина должна быть >= %v", binLength)
 	}
 
-	userInput = strings.TrimSpace(userInput)
-	userInput = strings.ReplaceAll(userInput, " ", "")
-	userInput = strings.ReplaceAll(userInput, "-", "")
-
-	return userInput, nil
+	return strconv.Atoi(cardNumber[:binLength])
 }
 
-func validateInput(input string) bool {
-	if len(input) < 13 || len(input) > 19 {
-		return false
-	}
-
-	for _, r := range input {
-		if r < '0' || r > '9' {
-			return false
+func findBankByBIN(BIN int, banks []Bank) (string, bool) {
+	idx, found := slices.BinarySearchFunc(banks, BIN, func(b Bank, target int) int {
+		if b.StartBIN > target {
+			return 1
 		}
+
+		if b.EndBIN < target {
+			return -1
+		}
+
+		return 0
+	})
+
+	if found {
+		return banks[idx].Name, true
 	}
 
-	return true
+	return "", false
 }

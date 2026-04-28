@@ -4,9 +4,12 @@
 *.dll
 *.so
 *.dylib
+*.out
+Validator
 
 # Игнорируем тестовые файлы
 *.test
+banks.txt
 
 # Игнорируем файлы IDE
 .idea/
